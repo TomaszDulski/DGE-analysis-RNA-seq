@@ -1,0 +1,194 @@
+---
+title: "RNA_seq pilot"
+author: "TomaszDulski"
+date: "11/30/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "/home/jason/practice/RNA_seq")
+getwd()
+```
+
+## Loading all necessary packages
+```{r message=FALSE, warning=FALSE}
+library("DESeq2")
+library("tximport")
+library("vsn")
+library("pheatmap")
+library("RColorBrewer")
+library("dplyr")
+library("clusterProfiler")
+library("cowplot")
+library("ggplot2")
+library("org.Dr.eg.db")
+library("ggcorrplot")
+library("biomaRt")
+library("xlsx")
+
+```
+
+## Listing quants.sf files obtained from Salmon mapping & quantification
+```{r}
+path <- getwd()
+quants <- list.files(path,
+                     pattern = ".genes.sf",
+                     full.names = TRUE,
+                     recursive = TRUE)
+
+files <- quants[c(5, 6, 3, 4, 1, 2)]
+
+```
+
+## Generating SampleTable that will be used for downstream analysis
+```{r}
+sampleTable <- data.frame(genotype = rep(c("WT", "hom", "het"), each = 2),
+                          treatment = paste0(rep(c("none"), each = 6)),
+                          replicate = rep(c(1:2), times = 3),
+                          type = rep(c("pseudo", "raw"), times = 3))
+
+sampleTable$genotype_replicate <- paste(sampleTable$genotype,
+                                        sampleTable$replicate,
+                                        sep = "_")
+
+rownames(sampleTable) <- sampleTable$genotype_replicate
+  
+sampleTable
+```
+
+## Annotating SampleTable and Importing quants
+```{r}
+names(files) <- rownames(sampleTable)
+
+txi <- tximport(files,
+                type = "salmon",
+                txOut = TRUE,
+                importer = read.delim)
+
+
+# printing first 5 counts values
+head(txi$counts, n = 5)
+```
+## DESeq2 model
+```{r}
+dds <- DESeqDataSetFromTximport(txi,
+                                colData = sampleTable,
+                                design = ~ genotype)
+```
+
+## Filtering out low counts genes
+
+```{r}
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+
+```
+
+## This function estimates the size factors using the "median ratio method"
+```{r message=FALSE, warning=FALSE}
+dds <- estimateSizeFactors(dds)
+dds <- estimateDispersions(dds)
+
+rld <- rlog(dds,
+            blind = FALSE)
+
+
+head(assay(rld), 10)
+
+```
+
+## Data normalization
+```{r}
+# before
+meanSdPlot(assay(normTransform(dds)))
+
+```
+
+## and after transformation
+```{r}
+meanSdPlot(assay(rld))
+
+```
+
+## Euclidan distances between samples
+```{r}
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+Euclidan_pheatmap <- pheatmap(
+  sampleDistMatrix,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  col = colors,
+  show_colnames = FALSE
+  )
+
+Euclidan_pheatmap
+```
+
+## PCA
+```{r}
+PCA <-
+  plotPCA(rld, 
+          intgroup = c("genotype"),
+          ntop = 500)
+PCA
+
+```
+
+## Inspecting top20 most expressed genes
+```{r}
+select <- order(rowMeans(assay(rld)),
+               decreasing = TRUE)[1:20]
+
+top20 <- assay(rld)[select, ]
+top20_rownames <- rownames(top20)
+
+#biomart
+zebrafish <- biomaRt::useDataset("drerio_gene_ensembl", useMart("ensembl"))
+
+top20names <-
+  getBM(
+  filters = "ensembl_transcript_id_version",
+  attributes = c(
+  "external_gene_name"
+  ),
+  values = top20_rownames,
+  mart = zebrafish,
+  bmHeader = TRUE,
+  uniqueRows = TRUE
+  )
+
+rownames(top20) <- top20names$`Gene name`
+pheatmap(top20, 
+         cluster_rows = TRUE, 
+         show_rownames = TRUE, 
+         cluster_cols = TRUE)
+```
+##Differential expression analysis
+
+
+```{r message=FALSE, warning=FALSE}
+dds <- DESeq(dds, 
+             quiet = F)
+
+Res <- results(dds)
+Res
+```
+
+## contrast wt vs homo
+```{r message=FALSE, warning=FALSE}
+Res_WT.vs.hom <-  DESeq2::results(dds,
+                                   contrast = c("genotype", "WT", "hom"),
+                                   independentFiltering = T)
+
+# summary of AVN pos vs AVN neg
+summary(Res_WT.vs.hom)
+
+```
+
